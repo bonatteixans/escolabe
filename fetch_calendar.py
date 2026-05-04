@@ -1,6 +1,6 @@
 """
 La Salle GVDasa - Extrator de Calendário Semanal
-Faz login via Playwright e usa a sessão autenticada para chamar a API REST.
+Faz login via Playwright e usa fetch() do browser para chamar a API REST.
 """
 
 import asyncio
@@ -9,9 +9,8 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
-from playwright.async_api import async_playwright, BrowserContext
+from playwright.async_api import async_playwright, BrowserContext, Page
 
-# ── Configurações ──────────────────────────────────────────────────────────────
 LOGIN_URL   = "https://lasalle.aluno.gvdasa.com.br"
 API_BASE    = "https://api.gvdasa.com.br/portal/api/v1"
 OUTPUT_FILE = Path(__file__).parent / "index.html"
@@ -21,86 +20,82 @@ SENHA     = os.environ["GVDASA_SENHA"]
 
 
 # ── Login ──────────────────────────────────────────────────────────────────────
-async def fazer_login(context: BrowserContext) -> None:
-    page = await context.new_page()
-
+async def fazer_login(page: Page) -> None:
     print("🔐 Abrindo portal La Salle...")
     await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
     await asyncio.sleep(2)
-    print(f"   Redirecionado para: {page.url}")
+    print(f"   URL: {page.url}")
 
     await page.wait_for_selector(
         'input:not([type="hidden"]):not([type="password"])',
         timeout=20_000, state="visible"
     )
-
     print("📝 Preenchendo credenciais...")
     await page.fill('input:not([type="hidden"]):not([type="password"])', MATRICULA)
     await asyncio.sleep(0.3)
     await page.fill('input[type="password"]', SENHA)
     await asyncio.sleep(0.3)
-
-    print("🖱️ Clicando em Entrar...")
     await page.click('button[type="submit"]')
 
-    print("⏳ Aguardando redirecionamento pós-login...")
+    print("⏳ Aguardando redirecionamento...")
     await page.wait_for_url("**/pagina-inicial**", timeout=45_000)
     await page.wait_for_load_state("networkidle", timeout=20_000)
     print(f"✅ Login OK! URL: {page.url}")
-    await page.close()
 
 
-# ── Chamadas à API via sessão autenticada ──────────────────────────────────────
-async def api_get(context: BrowserContext, url: str, params: dict = None) -> dict | list:
-    page = await context.new_page()
-    try:
-        if params:
-            qs = "&".join(f"{k}={v}" for k, v in params.items())
-            full_url = f"{url}?{qs}"
-        else:
-            full_url = url
+# ── API via fetch() do browser ─────────────────────────────────────────────────
+async def api_get(page: Page, url: str, params: dict = None) -> any:
+    """Chama a API usando fetch() dentro do browser — usa cookies e headers do portal."""
+    if params:
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        full_url = f"{url}?{qs}"
+    else:
+        full_url = url
 
-        response_body = None
+    result = await page.evaluate(f"""async () => {{
+        const resp = await fetch("{full_url}", {{
+            method: "GET",
+            headers: {{
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            }},
+            credentials: "include"
+        }});
+        const text = await resp.text();
+        return {{ status: resp.status, body: text }};
+    }}""")
 
-        async def handle_response(response):
-            nonlocal response_body
-            if full_url in response.url and response.status == 200:
-                try:
-                    response_body = await response.json()
-                except Exception:
-                    pass
-
-        page.on("response", handle_response)
-        resp = await page.goto(full_url, wait_until="domcontentloaded", timeout=30_000)
-
-        if response_body is None and resp:
-            try:
-                text = await resp.text()
-                response_body = json.loads(text)
-            except Exception:
-                pass
-
-        return response_body or {}
-    finally:
-        await page.close()
+    print(f"   GET {full_url[-80:]} → {result['status']}")
+    if result["status"] == 200:
+        try:
+            return json.loads(result["body"])
+        except Exception:
+            return result["body"]
+    else:
+        print(f"   ⚠️ Resposta: {result['body'][:200]}")
+        return None
 
 
-async def fetch_contexto(context: BrowserContext) -> dict:
-    data = await api_get(context, f"{API_BASE}/ContextoUsuario")
-    print(f"   Resposta raw: {json.dumps(data)[:400]}")
-    usuario = data.get("usuario") or data if isinstance(data, dict) else {}
-    uid  = usuario.get("id") or usuario.get("Id") or usuario.get("idPessoa")
-    nome = usuario.get("nome") or usuario.get("Nome") or usuario.get("name") or ""
+# ── Funções de dados ───────────────────────────────────────────────────────────
+async def fetch_contexto(page: Page) -> dict:
+    data = await api_get(page, f"{API_BASE}/ContextoUsuario")
+    print(f"   Raw: {json.dumps(data)[:300]}")
+    if not data or not isinstance(data, dict):
+        raise RuntimeError(f"ContextoUsuario inválido: {data}")
+    usuario = data.get("usuario") or data
+    uid  = usuario.get("id") or usuario.get("idPessoa")
+    nome = usuario.get("nome") or usuario.get("name") or ""
     print(f"   Usuário: {nome} (id={uid})")
     if not uid:
-        raise RuntimeError(f"Id do usuário não encontrado. Resposta: {json.dumps(data)[:300]}")
+        raise RuntimeError(f"Id não encontrado em: {json.dumps(data)[:300]}")
     return {"idResponsavel": int(uid), "nome": nome}
 
 
-async def fetch_enturmacoes(context: BrowserContext, id_aluno: int) -> dict:
-    data = await api_get(context, f"{API_BASE}/Alunos/Enturmacoes", {"idPessoa": id_aluno})
-    if not data or not isinstance(data, list):
-        raise RuntimeError(f"Enturmações vazias para idPessoa={id_aluno}: {data}")
+async def fetch_enturmacoes(page: Page, id_aluno: int) -> dict:
+    data = await api_get(page, f"{API_BASE}/Alunos/Enturmacoes", {"idPessoa": id_aluno})
+    print(f"   Raw enturmacoes: {json.dumps(data)[:300]}")
+    if not data or not isinstance(data, list) or len(data) == 0:
+        raise RuntimeError(f"Enturmações vazias: {data}")
     e = data[0]
     print(f"   Turma: {e.get('descricaoTurma')} | Aluno: {e.get('nomeAluno')}")
     return {
@@ -111,23 +106,24 @@ async def fetch_enturmacoes(context: BrowserContext, id_aluno: int) -> dict:
     }
 
 
-async def fetch_cronograma_dia(context: BrowserContext, id_enturmacao: int, id_turma: int, data_aula: date) -> dict:
-    return await api_get(context, f"{API_BASE}/Enturmacoes/Cronograma", {
+async def fetch_cronograma_dia(page: Page, id_enturmacao: int, id_turma: int, data_aula: date) -> dict:
+    r = await api_get(page, f"{API_BASE}/Enturmacoes/Cronograma", {
         "idEnturmacao": id_enturmacao,
         "dataAula":     data_aula.isoformat(),
         "idTurma":      id_turma,
     })
+    return r or {"dataAula": data_aula.isoformat(), "aulas": []}
 
 
-async def fetch_semana(context: BrowserContext, id_enturmacao: int, id_turma: int) -> list[dict]:
+async def fetch_semana(page: Page, id_enturmacao: int, id_turma: int) -> list[dict]:
     hoje   = date.today()
     inicio = hoje - timedelta(days=hoje.weekday())
     dias   = [inicio + timedelta(days=i) for i in range(5)]
     semana = []
     for d in dias:
         try:
-            r = await fetch_cronograma_dia(context, id_enturmacao, id_turma, d)
-            semana.append(r if r else {"dataAula": d.isoformat(), "aulas": []})
+            r = await fetch_cronograma_dia(page, id_enturmacao, id_turma, d)
+            semana.append(r)
         except Exception as ex:
             print(f"   ⚠️ Erro em {d}: {ex}")
             semana.append({"dataAula": d.isoformat(), "aulas": []})
@@ -152,7 +148,7 @@ def render_html(semana: list[dict], info: dict) -> str:
     for dia in semana:
         for aula in dia.get("aulas", []):
             if not aula.get("aulaCancelada"):
-                get_cor(aula["disciplina"], cor_cache)
+                get_cor(aula.get("disciplina", ""), cor_cache)
 
     legenda_html = "".join(
         f'<span class="leg-item"><span class="leg-dot" style="background:{cor}"></span>{disc}</span>'
@@ -276,27 +272,26 @@ footer{{text-align:center;padding:16px;font-size:11px;color:var(--sub);border-to
 </html>"""
 
 
-# ── Orquestração principal ─────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 async def main():
     print("🚀 Iniciando extração do calendário La Salle...")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
-        )
+        page    = await browser.new_page()
 
-        await fazer_login(context)
+        await fazer_login(page)
 
+        # Agora estamos na página do portal — fetch() funciona com CORS+cookies
         print("📋 Buscando contexto do usuário...")
-        ctx      = await fetch_contexto(context)
+        ctx      = await fetch_contexto(page)
         id_aluno = ctx["idResponsavel"] - 1
 
         print(f"🎒 Buscando enturmação (idAluno={id_aluno})...")
-        enturmacao = await fetch_enturmacoes(context, id_aluno)
+        enturmacao = await fetch_enturmacoes(page, id_aluno)
 
         print("📅 Buscando cronograma da semana...")
-        semana = await fetch_semana(context, enturmacao["idEnturmacao"], enturmacao["idTurma"])
+        semana = await fetch_semana(page, enturmacao["idEnturmacao"], enturmacao["idTurma"])
 
         await browser.close()
 
