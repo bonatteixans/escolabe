@@ -1,0 +1,44 @@
+name: 📅 Atualizar Calendário La Salle
+
+on:
+  schedule:
+    - cron: '0 9 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  gerar-calendario:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Instalar dependências
+        run: |
+          pip install playwright httpx
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: 🚀 Rodar script de extração
+        env:
+          GVDASA_MATRICULA: ${{ secrets.GVDASA_MATRICULA }}
+          GVDASA_SENHA: ${{ secrets.GVDASA_SENHA }}
+        run: python fetch_calendar.py
+
+      - name: 📤 Publicar no GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          publish_branch: gh-pages
+          include_files: index.html
