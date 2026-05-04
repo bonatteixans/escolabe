@@ -112,15 +112,18 @@ async def get_auth_token() -> str:
         await page.wait_for_load_state("networkidle", timeout=30_000)
         await asyncio.sleep(3)
 
-        # Se ainda não capturou, navega para o cronograma para forçar chamadas à API
-        if not captured_token:
+        # Se já capturou via intercept, ótimo
+        if captured_token:
+            print("✅ Token já capturado via intercept!")
+        else:
+            # Navega para o cronograma para forçar chamadas à API
             print("🔄 Navegando para cronograma para forçar requisições à API...")
             await page.goto(f"{LOGIN_URL}/cronograma", wait_until="networkidle", timeout=30_000)
-            await asyncio.sleep(4)
+            await asyncio.sleep(5)
 
-        # Se ainda não capturou, vasculha o localStorage em todos os domínios
         if not captured_token:
-            print("🔍 Buscando token no localStorage...")
+            # Inspeciona TODOS os valores do localStorage (não só as chaves)
+            print("🔍 Inspecionando localStorage completo...")
             all_storage = await page.evaluate("""() => {
                 const result = {};
                 for (let i = 0; i < localStorage.length; i++) {
@@ -129,61 +132,75 @@ async def get_auth_token() -> str:
                 }
                 return result;
             }""")
-            print(f"   localStorage keys: {list(all_storage.keys())}")
+            print(f"   Chaves: {list(all_storage.keys())}")
             for key, val in all_storage.items():
                 if not val:
                     continue
-                # Tenta direto como JWT
+                print(f"   [{key}] = {val[:80]}...")
+                # JWT direto
                 if val.startswith("eyJ"):
                     captured_token = val
-                    print(f"   Token direto na chave: {key}")
+                    print(f"   ✅ Token JWT direto em: {key}")
                     break
-                # Tenta parsear como JSON e buscar access_token
+                # JSON com campos de token
                 try:
                     obj = json.loads(val)
                     if isinstance(obj, dict):
-                        for field in ("access_token", "token", "accessToken", "id_token"):
-                            if obj.get(field, "").startswith("eyJ"):
-                                captured_token = obj[field]
-                                print(f"   Token em {key}.{field}")
+                        for field in ("access_token", "token", "accessToken", "id_token", "bearer"):
+                            v = obj.get(field, "")
+                            if isinstance(v, str) and v.startswith("eyJ"):
+                                captured_token = v
+                                print(f"   ✅ Token em {key}.{field}")
                                 break
-                        # Busca recursiva em objetos aninhados
-                        if not captured_token:
-                            val_str = json.dumps(obj)
-                            import re
-                            matches = re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', val_str)
-                            if matches:
-                                captured_token = matches[0]
-                                print(f"   Token encontrado via regex em {key}")
-                                break
+                    if not captured_token:
+                        # Busca JWT em qualquer lugar do JSON serializado
+                        val_str = json.dumps(obj)
+                        matches = re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', val_str)
+                        if matches:
+                            captured_token = matches[0]
+                            print(f"   ✅ Token via regex em {key}")
+                            break
                 except Exception:
-                    pass
-
-        # Última tentativa: sessionStorage
-        if not captured_token:
-            print("🔍 Buscando token no sessionStorage...")
-            session_storage = await page.evaluate("""() => {
-                const result = {};
-                for (let i = 0; i < sessionStorage.length; i++) {
-                    const key = sessionStorage.key(i);
-                    result[key] = sessionStorage.getItem(key);
-                }
-                return result;
-            }""")
-            for key, val in session_storage.items():
-                if not val:
-                    continue
-                if val.startswith("eyJ"):
-                    captured_token = val
-                    break
-                try:
-                    import re
+                    # Busca JWT direto na string
                     matches = re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', val)
                     if matches:
                         captured_token = matches[0]
+                        print(f"   ✅ Token via regex string em {key}")
                         break
-                except Exception:
-                    pass
+
+        if not captured_token:
+            # Tenta via JavaScript injetado — força o app a expor o token
+            print("🔍 Tentando capturar token via JS injetado...")
+            token_js = await page.evaluate("""() => {
+                // Tenta pegar do oidc-client (padrão GVDasa)
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const val = localStorage.getItem(key);
+                    if (val && val.includes('access_token')) {
+                        try {
+                            const obj = JSON.parse(val);
+                            if (obj.access_token) return obj.access_token;
+                        } catch(e) {}
+                    }
+                }
+                // Tenta sessionStorage também
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    const val = sessionStorage.getItem(key);
+                    if (val && val.includes('access_token')) {
+                        try {
+                            const obj = JSON.parse(val);
+                            if (obj.access_token) return obj.access_token;
+                        } catch(e) {}
+                    }
+                }
+                return null;
+            }""")
+            if token_js and token_js.startswith("eyJ"):
+                captured_token = token_js
+                print("   ✅ Token capturado via JS!")
+            else:
+                print(f"   JS retornou: {str(token_js)[:80]}")
 
         await browser.close()
 
