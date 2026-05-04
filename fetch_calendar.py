@@ -24,8 +24,8 @@ SENHA     = os.environ["GVDASA_SENHA"]
 
 
 # ── Login e captura do token ───────────────────────────────────────────────────
-async def get_auth_token() -> tuple[str, dict]:
-    """Faz login via Playwright e retorna (bearer_token, contexto_usuario)."""
+async def get_auth_token() -> str:
+    """Faz login via Playwright e retorna o bearer token."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
@@ -33,49 +33,137 @@ async def get_auth_token() -> tuple[str, dict]:
 
         captured_token: str | None = None
 
+        # Intercepta qualquer requisição à API GVDasa para pegar o Bearer token
         async def intercept(request):
             nonlocal captured_token
+            if captured_token:
+                return
             auth = request.headers.get("authorization", "")
             if auth.startswith("Bearer ") and "api.gvdasa.com.br" in request.url:
                 captured_token = auth.split(" ", 1)[1]
+                print(f"✅ Token capturado via request intercept!")
 
         page.on("request", intercept)
 
-        print("🔐 Abrindo portal...")
-        await page.goto(LOGIN_URL, wait_until="networkidle")
+        print("🔐 Abrindo portal La Salle...")
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
+        await asyncio.sleep(3)
 
-        # Preenche matrícula e senha
-        await page.fill('input[type="text"], input:not([type="password"]):not([type="hidden"])', MATRICULA)
-        await page.fill('input[type="password"]', SENHA)
-        await page.click('button:has-text("ENTRAR"), button[type="submit"]')
+        # Preenche matrícula
+        print("📝 Preenchendo credenciais...")
+        try:
+            await page.wait_for_selector('input', timeout=15_000)
+            inputs = await page.query_selector_all('input')
+            print(f"   {len(inputs)} inputs encontrados")
+            for inp in inputs:
+                itype = await inp.get_attribute("type") or "text"
+                if itype not in ("password", "hidden", "checkbox", "radio", "submit"):
+                    await inp.fill(MATRICULA)
+                    break
+            await page.fill('input[type="password"]', SENHA)
+        except Exception as e:
+            print(f"⚠️ Erro ao preencher: {e}")
 
-        # Aguarda navegação pós-login
-        print("⏳ Aguardando login...")
-        await page.wait_for_url("**/pagina-inicial**", timeout=30_000)
-        await page.wait_for_load_state("networkidle")
+        # Clica no botão de login
+        try:
+            btn = await page.query_selector('button[type="submit"], button')
+            if btn:
+                await btn.click()
+        except Exception as e:
+            print(f"⚠️ Erro ao clicar: {e}")
 
-        # Força uma chamada para capturar o token
-        await page.goto(f"{LOGIN_URL}/cronograma", wait_until="networkidle")
-        await asyncio.sleep(2)
+        # Aguarda redirecionamento pós-login
+        print("⏳ Aguardando login e redirecionamento...")
+        try:
+            await page.wait_for_url("**/pagina-inicial**", timeout=45_000)
+        except Exception:
+            print("   Timeout esperando /pagina-inicial, continuando...")
 
+        await page.wait_for_load_state("networkidle", timeout=30_000)
+        await asyncio.sleep(3)
+
+        # Se ainda não capturou, navega para o cronograma para forçar chamadas à API
         if not captured_token:
-            # Tenta pegar do localStorage
-            token_raw = await page.evaluate(
-                "() => Object.entries(localStorage).find(([k,v]) => v.startsWith('eyJ'))?.[1]"
-            )
-            if token_raw:
+            print("🔄 Navegando para cronograma para forçar requisições à API...")
+            await page.goto(f"{LOGIN_URL}/cronograma", wait_until="networkidle", timeout=30_000)
+            await asyncio.sleep(4)
+
+        # Se ainda não capturou, vasculha o localStorage em todos os domínios
+        if not captured_token:
+            print("🔍 Buscando token no localStorage...")
+            all_storage = await page.evaluate("""() => {
+                const result = {};
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    result[key] = localStorage.getItem(key);
+                }
+                return result;
+            }""")
+            print(f"   localStorage keys: {list(all_storage.keys())}")
+            for key, val in all_storage.items():
+                if not val:
+                    continue
+                # Tenta direto como JWT
+                if val.startswith("eyJ"):
+                    captured_token = val
+                    print(f"   Token direto na chave: {key}")
+                    break
+                # Tenta parsear como JSON e buscar access_token
                 try:
-                    obj = json.loads(token_raw)
-                    captured_token = obj.get("access_token") or obj.get("token") or token_raw
+                    obj = json.loads(val)
+                    if isinstance(obj, dict):
+                        for field in ("access_token", "token", "accessToken", "id_token"):
+                            if obj.get(field, "").startswith("eyJ"):
+                                captured_token = obj[field]
+                                print(f"   Token em {key}.{field}")
+                                break
+                        # Busca recursiva em objetos aninhados
+                        if not captured_token:
+                            val_str = json.dumps(obj)
+                            import re
+                            matches = re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', val_str)
+                            if matches:
+                                captured_token = matches[0]
+                                print(f"   Token encontrado via regex em {key}")
+                                break
                 except Exception:
-                    captured_token = token_raw
+                    pass
+
+        # Última tentativa: sessionStorage
+        if not captured_token:
+            print("🔍 Buscando token no sessionStorage...")
+            session_storage = await page.evaluate("""() => {
+                const result = {};
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    result[key] = sessionStorage.getItem(key);
+                }
+                return result;
+            }""")
+            for key, val in session_storage.items():
+                if not val:
+                    continue
+                if val.startswith("eyJ"):
+                    captured_token = val
+                    break
+                try:
+                    import re
+                    matches = re.findall(r'eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}', val)
+                    if matches:
+                        captured_token = matches[0]
+                        break
+                except Exception:
+                    pass
 
         await browser.close()
 
         if not captured_token:
-            raise RuntimeError("Não foi possível capturar o token de autenticação.")
+            raise RuntimeError(
+                "Não foi possível capturar o token de autenticação. "
+                "Verifique se GVDASA_MATRICULA e GVDASA_SENHA estão corretos."
+            )
 
-        print("✅ Token capturado!")
+        print("✅ Token capturado com sucesso!")
         return captured_token
 
 
