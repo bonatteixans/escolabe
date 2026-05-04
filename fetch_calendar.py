@@ -49,35 +49,65 @@ async def get_auth_token() -> str:
         await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(3)
 
-        # Preenche matrícula
+        print(f"   URL atual: {page.url}")
+
+        # O portal redireciona para login.lasalle.edu.br via OAuth
+        # Aguarda a página de login OAuth carregar (pode já ter redirecionado)
+        print("📝 Aguardando página de login OAuth...")
+        try:
+            # Aguarda aparecer um input visível de texto (matrícula)
+            await page.wait_for_selector(
+                'input:not([type="hidden"]):not([type="password"])',
+                timeout=20_000,
+                state="visible"
+            )
+        except Exception:
+            print(f"   Ainda em: {page.url}")
+
+        print(f"   URL do login: {page.url}")
+
+        # Preenche matrícula e senha
         print("📝 Preenchendo credenciais...")
         try:
-            await page.wait_for_selector('input', timeout=15_000)
-            inputs = await page.query_selector_all('input')
-            print(f"   {len(inputs)} inputs encontrados")
-            for inp in inputs:
-                itype = await inp.get_attribute("type") or "text"
-                if itype not in ("password", "hidden", "checkbox", "radio", "submit"):
-                    await inp.fill(MATRICULA)
-                    break
+            # Preenche o primeiro input visível (matrícula/usuário)
+            await page.fill('input:not([type="hidden"]):not([type="password"])', MATRICULA)
+            await asyncio.sleep(0.5)
             await page.fill('input[type="password"]', SENHA)
+            await asyncio.sleep(0.5)
+            print("   Credenciais preenchidas!")
         except Exception as e:
             print(f"⚠️ Erro ao preencher: {e}")
+            # Tenta por índice
+            try:
+                inputs = await page.query_selector_all('input:not([type="hidden"])')
+                print(f"   Inputs visíveis: {len(inputs)}")
+                if len(inputs) >= 2:
+                    await inputs[0].fill(MATRICULA)
+                    await inputs[1].fill(SENHA)
+                    print("   Preenchido por índice!")
+            except Exception as e2:
+                print(f"⚠️ Também falhou por índice: {e2}")
 
         # Clica no botão de login
+        print("🖱️ Clicando em Entrar...")
         try:
-            btn = await page.query_selector('button[type="submit"], button')
-            if btn:
-                await btn.click()
+            # Tenta várias estratégias para achar o botão
+            for selector in ['button[type="submit"]', 'input[type="submit"]', 'button:has-text("Entrar")', 'button:has-text("ENTRAR")', 'button']:
+                btn = await page.query_selector(selector)
+                if btn:
+                    await btn.click()
+                    print(f"   Clicou em: {selector}")
+                    break
         except Exception as e:
             print(f"⚠️ Erro ao clicar: {e}")
 
-        # Aguarda redirecionamento pós-login
-        print("⏳ Aguardando login e redirecionamento...")
+        # Aguarda redirecionamento de volta para o portal após login OAuth
+        print("⏳ Aguardando redirecionamento pós-login...")
         try:
             await page.wait_for_url("**/pagina-inicial**", timeout=45_000)
+            print(f"   Chegou em: {page.url}")
         except Exception:
-            print("   Timeout esperando /pagina-inicial, continuando...")
+            print(f"   Timeout. URL atual: {page.url}")
 
         await page.wait_for_load_state("networkidle", timeout=30_000)
         await asyncio.sleep(3)
