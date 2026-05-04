@@ -87,9 +87,14 @@ async def api_get(context: BrowserContext, url: str, params: dict = None) -> dic
 
 async def fetch_contexto(context: BrowserContext) -> dict:
     data = await api_get(context, f"{API_BASE}/ContextoUsuario")
-    usuario = data.get("usuario", {})
-    print(f"   Usuário: {usuario.get('nome')} (id={usuario.get('id')})")
-    return {"idResponsavel": usuario["id"], "nome": usuario["nome"]}
+    print(f"   Resposta raw: {json.dumps(data)[:400]}")
+    usuario = data.get("usuario") or data if isinstance(data, dict) else {}
+    uid  = usuario.get("id") or usuario.get("Id") or usuario.get("idPessoa")
+    nome = usuario.get("nome") or usuario.get("Nome") or usuario.get("name") or ""
+    print(f"   Usuário: {nome} (id={uid})")
+    if not uid:
+        raise RuntimeError(f"Id do usuário não encontrado. Resposta: {json.dumps(data)[:300]}")
+    return {"idResponsavel": int(uid), "nome": nome}
 
 
 async def fetch_enturmacoes(context: BrowserContext, id_aluno: int) -> dict:
