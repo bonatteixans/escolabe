@@ -87,7 +87,15 @@ async def fetch_enturmacoes(page: Page, id_aluno: int) -> dict:
     e = data[0]
     # Tenta diferentes nomes de campo usados pelo GVDasa
     id_enturmacao = e.get("idEnturmacao") or e.get("id") or e.get("idMatricula")
-    id_turma = e.get("idTurma") or e.get("turma", {}).get("id") if isinstance(e.get("turma"), dict) else e.get("idTurma")
+    # idTurma pode estar em vários campos
+    id_turma = (e.get("idTurma") or 
+                e.get("idTurmaAtual") or
+                e.get("turmaId") or
+                (e.get("turmaObj", {}) or {}).get("id") or
+                0)
+    # Se não encontrou, imprime todo o objeto para diagnóstico
+    if not id_turma:
+        print(f"   ⚠️ idTurma não encontrado, campos disponíveis: {list(e.keys())}")
     nome_aluno_raw = e.get("nomeAluno") or e.get("nome") or e.get("nomeEstudante") or "Bernardo"
     turma_raw = e.get("descricaoTurma") or e.get("turma") or e.get("descricao") or ""
     print(f"   Turma: {turma_raw} | Aluno: {nome_aluno_raw}")
@@ -104,8 +112,11 @@ async def fetch_enturmacoes(page: Page, id_aluno: int) -> dict:
 async def fetch_componentes(page: Page, id_enturmacao: int) -> list:
     data = await api_get(page, f"{API_BASE}/Enturmacoes/ComponentesCurriculares", {"idEnturmacao": id_enturmacao})
     if not data or not isinstance(data, list):
+        print(f"   ⚠️ Componentes raw: {data}")
         return []
     print(f"   {len(data)} componentes curriculares encontrados")
+    if data:
+        print(f"   Exemplo componente: {json.dumps(data[0])[:300]}")
     return data
 
 
@@ -148,6 +159,8 @@ async def fetch_todos_dados(page: Page, enturmacao: dict, componentes: list) -> 
 
         for (mes, ano) in meses:
             aulas = await fetch_componente_mes(page, enturmacao["idEnturmacao"], enturmacao["idTurma"], id_comp, mes, ano)
+            if aulas:
+                print(f"     ✅ {nome_comp} {mes}/{ano}: {len(aulas)} aulas")
             for aula in aulas:
                 data_str = aula.get("dataAula", "")[:10]
                 if not data_str:
