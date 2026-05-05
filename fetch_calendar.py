@@ -123,11 +123,11 @@ async def fetch_componentes(page: Page, id_enturmacao: int) -> list:
 # ── Cronograma por componente (mês inteiro) ────────────────────────────────────
 async def fetch_componente_mes(page: Page, id_enturmacao: int, id_turma: int, id_componente: int, mes: int, ano: int) -> list:
     data = await api_get(page, f"{API_BASE}/Enturmacoes/Cronograma/ComponenteCurricular", {
-        "idEnturmacao":          id_enturmacao,
+        "idEnturmacao":           id_enturmacao,
         "idComponenteCurricular": id_componente,
-        "mes":                   mes,
-        "ano":                   ano,
-        "idTurma":               id_turma,
+        "mes":                    mes,
+        "ano":                    ano,
+        "idTurma":                id_turma,
     })
     return data if isinstance(data, list) else []
 
@@ -150,15 +150,17 @@ async def fetch_todos_dados(page: Page, enturmacao: dict, componentes: list) -> 
     por_data: dict = {}
 
     for comp in componentes:
-        id_comp     = comp.get("idComponenteCurricular") or comp.get("id")
-        nome_comp   = comp.get("descricaoComponenteCurricular") or comp.get("descricao") or comp.get("nome") or f"Componente {id_comp}"
-        prof_comp   = comp.get("nomeProfessor") or ""
+        # Campos reais da API GVDasa
+        id_comp   = comp.get("idDisciplina") or comp.get("idComponenteCurricular") or comp.get("id")
+        nome_comp = comp.get("descricao") or comp.get("descricaoComponenteCurricular") or comp.get("nome") or f"Componente {id_comp}"
+        prof_comp = comp.get("professor") or comp.get("nomeProfessor") or ""
+        id_turma  = comp.get("idTurma") or enturmacao.get("idTurma") or 0
         if not id_comp:
             continue
         print(f"   Buscando: {nome_comp}")
 
         for (mes, ano) in meses:
-            aulas = await fetch_componente_mes(page, enturmacao["idEnturmacao"], enturmacao["idTurma"], id_comp, mes, ano)
+            aulas = await fetch_componente_mes(page, enturmacao["idEnturmacao"], id_turma, id_comp, mes, ano)
             if aulas:
                 print(f"     ✅ {nome_comp} {mes}/{ano}: {len(aulas)} aulas")
             for aula in aulas:
