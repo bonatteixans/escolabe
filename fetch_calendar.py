@@ -83,13 +83,21 @@ async def fetch_enturmacoes(page: Page, id_aluno: int) -> dict:
     data = await api_get(page, f"{API_BASE}/Alunos/Enturmacoes", {"idPessoa": id_aluno})
     if not data or not isinstance(data, list):
         raise RuntimeError(f"Enturmações vazias: {data}")
+    print(f"   Raw enturmacao: {json.dumps(data[0])[:300]}")
     e = data[0]
-    print(f"   Turma: {e.get('descricaoTurma')} | Aluno: {e.get('nomeAluno')}")
+    # Tenta diferentes nomes de campo usados pelo GVDasa
+    id_enturmacao = e.get("idEnturmacao") or e.get("id") or e.get("idMatricula")
+    id_turma = e.get("idTurma") or e.get("turma", {}).get("id") if isinstance(e.get("turma"), dict) else e.get("idTurma")
+    nome_aluno_raw = e.get("nomeAluno") or e.get("nome") or e.get("nomeEstudante") or "Bernardo"
+    turma_raw = e.get("descricaoTurma") or e.get("turma") or e.get("descricao") or ""
+    print(f"   Turma: {turma_raw} | Aluno: {nome_aluno_raw}")
+    if not id_enturmacao:
+        raise RuntimeError(f"idEnturmacao não encontrado: {e}")
     return {
-        "idEnturmacao": e["idEnturmacao"],
-        "idTurma":      e["idTurma"],
-        "turma":        e.get("descricaoTurma", ""),
-        "nomeAluno":    e.get("nomeAluno", ""),
+        "idEnturmacao": id_enturmacao,
+        "idTurma":      id_turma or 0,
+        "turma":        str(turma_raw) if not isinstance(turma_raw, str) else turma_raw,
+        "nomeAluno":    nome_aluno_raw,
     }
 
 
@@ -167,7 +175,8 @@ def render_html(por_data: dict, enturmacao: dict) -> str:
     import datetime, json as _json
 
     hoje          = date.today()
-    nome_aluno    = enturmacao.get("nomeAluno", "Bernardo").split()[0]
+    nome_raw = enturmacao.get("nomeAluno", "Bernardo") or "Bernardo"
+    nome_aluno = nome_raw.split()[0] if nome_raw.strip() else "Bernardo"
     gerado_em     = datetime.datetime.now().strftime("%d/%m/%Y às %H:%M")
 
     # Serializa dados para JS
